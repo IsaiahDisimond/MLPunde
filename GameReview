@@ -1,0 +1,821 @@
+# This Python 3 environment comes with many helpful analytics libraries installed
+# It is defined by the kaggle/python Docker image: https://github.com/kaggle/docker-python
+# For example, here's several helpful packages to load
+
+import numpy as np # linear algebra
+import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)
+
+# Input data files are available in the read-only "../input/" directory
+# For example, running this (by clicking run or pressing Shift+Enter) will list all files under the input directory
+
+import os
+for dirname, _, filenames in os.walk('/kaggle/input'):
+    for filename in filenames:
+        print(os.path.join(dirname, filename))
+
+# You can write up to 20GB to the current directory (/kaggle/working/) that gets preserved as output when you create a version using "Save & Run All" 
+# You can also write temporary files to /kaggle/temp/, but they won't be saved outside of the current session
+/kaggle/input/game-review-dataset/test_gr/test.csv
+/kaggle/input/game-review-dataset/train_gr/game_overview.csv
+/kaggle/input/game-review-dataset/train_gr/train.csv
+Introduction
+A Naive Bayes & Linear SVM are used to perform sentiment classification of the text reviews under 3 different settings
+
+With mimimal text processing
+Using a custom feature based on the uniqueness of a word in either the Positive and Negative classes
+Using text-preprocessing techniques to overcome the shortcomings of SciPy's built-in CountVectorizer
+The last (3) setting yields a marginal improvement (2% for the Linear SVC) over the baseline (1), with a final validation test accuracy of ~85% using the Linear SVC model.
+
+State of the Art techniques (i.e LSTM neural networks) won't be considered due to the relatively small (by Deep Learning standards) dataset (~ 17.5k reviews)
+
+A Peek at our data
+The data format is simple enough, user suggestions are marked as "1" for recommended and "0" otherwise under the "user_suggestion" column. There is a separate file containing the corresponding advertising blurp for the game's storefront, but that won't be used here.
+
+trainPD = pd.read_csv(r'/kaggle/input/game-review-dataset/train_gr/train.csv')
+testPD = pd.read_csv(r'/kaggle/input/game-review-dataset/test_gr/test.csv')
+trainPD.head()
+review_id	title	year	user_review	user_suggestion
+0	1	Spooky's Jump Scare Mansion	2016.0	I'm scared and hearing creepy voices. So I'll...	1
+1	2	Spooky's Jump Scare Mansion	2016.0	Best game, more better than Sam Pepper's YouTu...	1
+2	3	Spooky's Jump Scare Mansion	2016.0	A littly iffy on the controls, but once you kn...	1
+3	4	Spooky's Jump Scare Mansion	2015.0	Great game, fun and colorful and all that.A si...	1
+4	5	Spooky's Jump Scare Mansion	2015.0	Not many games have the cute tag right next to...	1
+testPD.head()
+review_id	title	year	user_review
+0	1603	Counter-Strike: Global Offensive	2015.0	Nice graphics, new maps, weapons and models. B...
+1	1604	Counter-Strike: Global Offensive	2018.0	I would not recommend getting into this at its...
+2	1605	Counter-Strike: Global Offensive	2018.0	Edit 11/12/18I have tried playing CS:GO recent...
+3	1606	Counter-Strike: Global Offensive	2015.0	The game is great. But the community is the wo...
+4	1607	Counter-Strike: Global Offensive	2015.0	I thank TrulyRazor for buying this for me a lo...
+df = trainPD.copy()
+df["n_words"] = df["user_review"].apply(lambda s: len(s.split()))
+df.head()                           
+review_id	title	year	user_review	user_suggestion	n_words
+0	1	Spooky's Jump Scare Mansion	2016.0	I'm scared and hearing creepy voices. So I'll...	1	132
+1	2	Spooky's Jump Scare Mansion	2016.0	Best game, more better than Sam Pepper's YouTu...	1	44
+2	3	Spooky's Jump Scare Mansion	2016.0	A littly iffy on the controls, but once you kn...	1	70
+3	4	Spooky's Jump Scare Mansion	2015.0	Great game, fun and colorful and all that.A si...	1	47
+4	5	Spooky's Jump Scare Mansion	2015.0	Not many games have the cute tag right next to...	1	67
+Review Length v.s. Sentiment
+There appears to be correlation between review length (character count) and the sentiment of the review, with shorter reviews tending to be more positive. The trend is especially evident within the sub-100 characters range. This is unsurpisingly, as an impassioned hatred serves as an unexpectedly good motivator for devoting large amounts of time to a particular cause). For the longer reviews (> 400 chars), the gap in the number of positive and negative reviews narrows. The reversal in trend could confuse simpler classifiers (Naive Bayes, SVM), and thus character counts won't be used as a feature.
+
+import matplotlib.pyplot as plt
+
+positiveDF = df[df["user_suggestion"] == 1]["n_words"]
+positiveWordVals = positiveDF.values.tolist()
+
+negativeDF = df[df["user_suggestion"] == 0]["n_words"]
+negativeWordVals = negativeDF.values.tolist()
+
+plt.figure(figsize=(20,10))
+plt.hist([positiveDF, negativeDF], bins=50, alpha=0.5, label=['positive reviews', 'negative reviews'],color=['g','r'])
+plt.title("Number of words per review")
+plt.xlabel("Number of words")
+plt.ylabel("Number of reviews")
+plt.legend()
+plt.show()
+
+reviewData = df[["title", "user_review", "user_suggestion", "n_words"]].values.tolist()
+reviewData[0]
+["Spooky's Jump Scare Mansion",
+ "I'm scared and hearing creepy voices.  So I'll pause for a moment and write a review while I wait for my heart beat to return to atleast somewhat calmer times.  This game is adorable and creepy like my happy tree friends but with the graphics sceme of my childhood (but more bubble and 'clean').  Hello 1990's.What charactes there are (that isnot trying to kill me) were likable and a bit odd.  I did do a few noob things though, such as:Oh look a class room full of ghosts from dead children, lets shine my flashlight on them and stand there staring at them..Or, hmm creepy music, I'll turn around and see if I can see what's chasing me.Never before in a game have I been this afraid of finding a locked door.",
+ 1,
+ 132]
+Some data cleanup
+The dataset doesn't consist entirely of English Reviews, some Japanese and Russian reviews can be spotted in the mix. Additionally, the data-scraping process also includes the "Early Access Review" and "Product received for free" disclaimers that are automatically inserted at the top of each review. These should be counted as noise and will thus be removed in this section.
+
+Non-English Review Removal
+
+NLTK and ScaPy probably have built in language detection, but for the sake of simplicity (and speed), English reviews will be treated as text which consist of ASCII characters for at least 50% of their length. As shown below, this also has the effect of removing reviews that are emoticon spam. In total, out of the ~17.5k reviews, only 91 will be discarded.
+
+#Removal of non-english reviews
+
+#Just checks whether at least 50% of the characters are within the ASCII code range (0 - 128)
+def isEnglish(line):
+    totalChars = len(line)
+    nAsciiChars = 0
+    for c in list(line):
+        if ord(c) >= 0 and ord(c) <= 128:
+            nAsciiChars += 1
+    return (nAsciiChars / totalChars) >= 0.5
+
+englishReviews = []
+nonEnglishReviews = []
+
+for review in reviewData:
+    if isEnglish(review[1]):
+        englishReviews.append(review)
+    else:
+        nonEnglishReviews.append(review)
+
+print("Sample of some removed reviews:\n")
+for r in nonEnglishReviews[5:10]:
+    print(r)
+Sample of some removed reviews:
+
+["Spooky's Jump Scare Mansion", "Early Access ReviewDay 1: So this game looks cute, i'm going to play this (downloading off indieDB)Day 2: Floor 50 reached, kinda spookyDay 3: Ok, finally made it to floor 100...Day 4: This♥♥♥♥♥♥is like SCP: Containment Breach but worseDay 5: Holy ♥♥♥♥, this place is creepyDay 8: I think the walls are shiftingDay 12: Something is definitely following meDay 15: I found some abandoned classrooms, the feeling of paranoia is starting to set in...Day 27: I think i'm going in circles, i can't find my way backDay 35: Got scared by a cartoon pumpkinDay ??: Oh god, what the ♥♥♥♥ is thatDay ??: The walls are bleeding, and something is chasing meDay ??: OhgodOhgodOhgodOhgodOhgodOhgodOhgodOhgodOhgodOhgodOhgodOhgodOhgodOhgodOhgodDay ??: O̦̞ͭ̏̓h̤̺̠̎̏̂͗͑͌̃ģ͍͇̼̪̪̱̫ͪ̌͗̉̂ͣo͂̈d̽̓́̐ͬO͈̯͕ͩ͝ĥ̘̬͙̝͙͇̹̌ͯ̿̇ģ̮̖͋ͤ͆͌̏o̢̖̲̖͎̯͈ͅḑ̥͍͕͙͓͈͑͗̀̾̍ͪÖ̧̞͔̺͔́̿̈́̔̄͌ͬh̗̞̖̗̤̼ͣͨ̒̊ͪͬ̚ͅg̘̲͙̝͕̽̇o̘̭̙ͬ͆̓̐̽́d̳̞̜͇̺̖̘O̮͛͛͘h̯̻̯̱̹̪̱̓͜g̸͚̟̳̦̣̜̀̓ͨ̔͛͛o̮̤̬̠̫̲ͤ̈́̂ͧͥd̠͍̤̈́̄ͥ͞O̩͛͘ḫ̀̀g̗̖̱̺͋̑͐́̚o̹̤͌͛͊̏̽̿d͕̳̖̜̬ͥ̐̔͂̿ͪỌ͉͐̓hͮ͜g̫̦̰̖̀̌o̞̙̞ͬ̉͆̓̾̔́d̆̿ͮ̂ͩ́O͆̏h̖͉̠̫́g̀̆̓̀ỏ̡͉̱̣̜̣d͍̝͌̋̉͊O̙̪͍̞̩̜̅̌ͭh̨g̟̘̪̱̝͖̐o̙͉̻ͦͥ̇̍͗ͦ͆d̠̈̃͂ͨ̍ͪ͑͠O̯̓ͨͨḥ͖͉̻̺̠͈ͧ̒̈g̣̰͈̯̱̈̓̔̓o̼d̼̱͛ͥ̋̂̆̽̏́O̭̮̼̳̣̎͑̄h̹̙̳͆̐̐ͥ̆g̘͙͉ͭ̅ͩ̑̔ͯ̈o͍̥͈͔̅ͦ̆̃ͮ̌d̟̰̤̜͈̦̏̀ͤͫŐ͇̫̠͕̔̒͂̎ḫ̡̎ġ͏̖͉ò̞̹͍͊ͮ̈́ͬ̓̽͝d̼̤́Day ??: H̛̯͓̩̹͇͓̖̞ͧͩ̒̉́ͯ͂͐͐ͦ̎͝͠ͅA̡̨͔̗̦̩̥̠̭ͯ̂̓̃͛̚ͅH̷̨̲̜̼̜̞̘̹̞̦̮̳̪͕͈ͪ̍ͥ̃̈́̍̎̿ͭ̎̇̔̽̏̒͆ͦͭ͢A̶̡̱̖͎̬͚͓̥͖̣͍͎̺̩̝͚̐ͫͮ́̉̍͗ͩ̊͊̿͌̌̀ͮͅH̰͇̲̩̩͙̣̳̗ͧ̍ͥ̿ͯͣ̈́ͦ̒̋͛̈ͭͦ̀̾̀̚̕͢A̵̩͇͕̘̯̣̟̯͇̥̜͖ͣͬ̑ͤ̉̃̏ͦ͑H̳̳͈͍̅͗͒͗̔̉ͣͬ͑ͭ̏̀͢A̪͈͖̟͈̫͊͒̾̐͑̚̚͟͝H̶͓̺͚̙͍͎̖͍̟̹̊͒̆̍̌͟À̶̾̓҉͏̵͔͉̘̲͈͈̣̣͉̥̮͟H̶̛̛͈̮͍͍̝̉̅ͥͮͬ̔̓ͪ̄̍͢͠A̸̹̙͇͚̤̣͖͓͔̋̾͌̓̈́̂̎̂͒͜͡ͅḨ̲̮̫̱̣̝͕̼̞̥̗̗͎̩̒̂̐̾͗̒̍̓̀̇ͥ͊ͪ̆̌̇̅̀͢͞͞A̢̧̛̩̗̳̮̩̰̟̦̲̟̟̭͖̥ͮ̅̐̄̒͐̄ͣ̉͒̓ͧ̆́̚̚̕H̴̶̛͒̅̑ͯͥ̄͞͏̲͖̪̪̻̣͈̙A̸̡̛̖̣̞͇̦͕͕̠͚̘̥̙͆̔ͯ̄ͬ̓̓ͦ̀̔͋̋͜H̡͉̙͚͚̞̩̜̥̪̦̞̣͖̘̑ͬ͂ͫ͂ͧͩ̊͆́ͩ́̃̋̉̏ͮ̎ͥ́̀͜͜A̵̧̝̩͖̮̪͔̜͉͉̲̣̋̂̓͌ͤ͌̉͊͂̊̅ͥ́H̷̬̙͕͚͖̣̹͇̝̝̜̝̜̘͙͇̬͑̉ͦ̽̆̑͌͂ͬͫͨ̏ͨ͒͂̀A̵̶̡̛̯͕̩̳̙͖̋ͦ͒̋̽ͮ̔̉̓̔̋̈ͨ̋ͮͭ͌̊H̵̦̥̰̹̟̙͎̹̩ͨͩ̉ͭ̋̓͛̑̔͌̎ͫ̋ͫ͘A̶̭͇̝̝̣̼̦̪̰͍̮͉ͨ͗͂ͮ̀ͣ̈́ͫ̓͌̇̔ͮ̐ͫ͗̌͗́͞ͅĤ̷̝̣͍͍̫ͯ̊͒̀͗͆ͬ̽̃̓͜͠A̵͈̼̖̹ͭ̌̋ͪ̓̓̈́̚͟͠͡H̛ͯ͒̆̑͒̔́ͯ͒ͫ̅̈̇ͪ̿̓ͣ͗͏̵͈̜̦̺̘͎̣̯͓̠̗̪̯̖͜ͅA̙̻͓̺͉̪ͣ͐́̉͡Ḫ̴̷̳͔̈̍̌͐ͣ̌ͪ͒̿̚A̵̷͚̰̯̝̼̮͇̻̫̬̳͈͔̲̱̰̻̲̾̎̑̂ͧͮ͋́̇̔H̴͔͚͈̦̗͚̫͎̳̬̜͓̣͓̤̞̍͋ͧ͛̋̍̅̌̓̌̀͘͘ͅͅT̴͉͍̟̠̝̰͈̣̘̣̤̲̯̆͛ͭ͒͂͆̀͟H̸̢̺̼̩̠̺͙̦͕̭̞̮̩͋͆͋ͬ͑ͭ̅̊́͜Eͩ͂̄̍̑͊ͤͮ̂ͣ̃̓҉̴̛̜̹̫̹̪͎͖̲͙̥̹͖̹̬͡ ̛̺̰̖̤̮̫̘̭̠̰͍͚͈͔ͧ̇̊͌ͨͫ̈́̆ͫ͂́ͅḊ̵̷͖̤̞̬̦̬̼̤̃̑̿ͣͬ͒͢Ö̧͈̠̮͖͇̥̜̻͍̰́ͧ̍ͧ̍̔ͪ͌ͨ͟͢Ļ̸̛̰̦̜̱̘͔̬̥͙̬͈̗̜̤̞̰̼͔̪̿̓̋́́L̴̡̛͇̰͚͉̤̤̫̯̣̟̲̦͉̲͕̝̑ͭ̌ͦ͡Ş̸̛͕͚̥̯̬̳̣̺̖̰̹̜̠̼̺͋̑͛͋̓ͤ͂̒̇̇ͤ͂͒ͣ̋̈̚͢͡ ̸̢̄ͤ̊̋̀̿͊̓͆̇͆͏̼̟̼̦̱̱̻͝M̡̢͙̰̳̪͇̘̯̟̖̤͓͙̩͐́̈́̊̾́̋̍͝ͅȮ̢͛ͯ̇͒͊҉͔͕̻̣̘̭̟̳̳̖̥̜̯̗̝̙̭͖͢ͅV̸̵̻͖̱͔̙̖̯̜͇̭͎̠̭̋̎̊̚̕͝͞ͅE̴̶̸͗̈ͯ̇̀͒̐ͪ̍ͦ̈́̑̍ͫͬ̌̊̔̓͏͖̫͉̳͔̟̺͕̳̘͘!̦̩͓͚͖̺ͣ̒ͥͣ͜͞ ̴̜͕̞̦͖̺̙̺̦̫̥̝̯̞͕̦̮͕̙̆̾͆̃̋͝͝W̛̙̙͕̳̼͌̎̄̆̽ͧ̕Ḩ̶͇̮̺̥͕͍͙͇̱ͣ͂̈̍̆̇͒͒̅́͆͗̑͒͗͒̚͢͢A͍̘̣̤ͨ͒̉̏͋̈͋̊ͨ̋ͮ͒͛͘͝T̴̶͎͚͖͎͚̜͙̩̳͈̜̘̳̓ͥ͊̆̓͛͒ͯ͢͜ ̶͒̀́̌ͪ̌͑ͫͧ́͗͋̊͞҉̴̲̜̳̥̟̻̘̤̼̱̞į̴̵̦̺͔͕̣̻̱̻̟̣͚͇̻̳̠͖ͥ͆̀ͦ̎ͦ͑ͦ̃ͨ́͟ͅs̸̷̶̬̜̱͇̳͈̫̬̲̼̅̑͊ͤ͋ͥͫ͋̈́͊̏̀̎͑ͮ͂̌͞ ̢͍̜͈̩̘̟̳̗̩͈͉͈̟͇̮̫̰ͬͯ̾ͮͫͧ̒ͩ̐͌̽͐͋ͨ̽̅̆ͬ́͝W̷͈̜͇͓͓͇̱͇̥͈͔̬̻͚̦̑̀̒ͦ̍͊̑̀͆ͭ̐̈́̐ͬ̅̓̏͛͐͟͝r̦͖̺̯͇̱͎̼̰̼ͥ̀̈́̈̀͢͞͞o͐̒̈̉͛̓͏̯͈̠͖͕̟̫̫̜̥͉̼̼̰͓̗̣͕̰N̸͎̼͓̩̯̱̜̮̥͖̮͈̙̟̱̤ͤ̃̃̿͂̍͂̽ͫͪͭ̔ͣͫ̚͟G̬̫̱̰̯̦̰̤̲͚̪͛̑̏ͨͭ̇̕͟ͅ ̵̴͕̠̙̘̖̬̜̖̰̣̦̙̞̖̳̹ͪ̎͐͑ͨ̽͑͊́͢ͅw̷̧̍̈̃̈́̑͗͑́͡҉͈̩̬̯̞̰͍͍̻̙̜͓̝̮͓͕i͆͒̈́̌͒͌͑̌͋̊̋̓ͤ̔ͧ͊̓͑҉̢̻̭͓̖̖͔̙͙̞͙͍́͝͞ͅT̬̬̪̼̤̫̖̘̹̱̜̖͓͇͉̄̌͒̒̈́ͦͩ͌ͨ̔̆̉͗͋̂ͩ̈̏̚͘ͅͅH̅̐̎̉̒ͩ̔̓̒̏̒͊͑͑҉̣̗̪͎͎̬̬̤̺̦̠̘̜ ̷̶̨̳͔̫̼̼̪̻̤͔̘̬̖̠̰͕̮̳͓̋͒ͣ̆͛̇͞e̷̴͕̯͔̤͈̲̠͉̗̬͒ͤ̋͋ͨͫ͘vͮ͊ͧ͐̓͗ͨ͏̨͙̯̘̰̼̻̻̮̼̺̭͙̺̰͙͡E̵ͪͯ͆ͭ̕͝҉͎̜͎r̴̨̢̟̩̬͇͎̪̝̣̝̈́̃ͫ̾̄̎́͗͘͠y̵̡͉͈͇͈̥̭̪͖̩͈͎̘̒ͩͯ̀̒̓ͦ̽̈́̾ͧ͌̃̾̒͑͢T̢ͤ͒͗͌ͪ̌̉ͬͫͤ҉̸̨̙̜̮̰̝̖͚̘̥͝ͅH̢ͨ̓ͦ̈͗ͨ̔̽̂͌̔͆̽̽ͤ̐҉̣̠͙̬̖̳̪͓͖̞̦͚͔͓͇ͅÍ̢̘̟̪̉́̀͝͠n̸̷̛͙͔̘̞͙͈ͭͭ͛̈ͤͧ͟ͅg̶̯̘͎̲͙͚̮̫͖̫͎̙͕̬ͬͯ̇̾̍ͣͯͭ̊ͪͫ͆̄̈́͌ͣͩ̃͠͡͡ͅ?̶̡͔͚̟̩̫͚̟̻̜̟̪̜̯͉̖ͣ̓ͣ̿̃͂ͫͨ̽ͪ͌́͡!̸̸̵̴̵̧̨̼̜͈͍͕̼̪̞̙̪̫̖͎͇͚̩̜̤̻̰͉̹̠ͣͣͨͬͪ̅̀̈̃ͥ̿ͧ̀̾̔ͦͨ̾̅̑̚͢ͅT̴̢͓͙̭̗̓͐ͨͤ̄̈ͮ͒͂͒͗̀h̃̎ͨ͒͌̓̋̍͏̸̰͔͖̗̼̟̟̪̫͍͚̜͚̜̝̘̣͠͝é̸̢͈͇̪͓̽͌̈́̈́́̚͡ ̛ͭ͋̏ͮͪ̍̆̑̽͛ͦ͋̚͝҉̴̯̰͙̣̠͍͙̹͖̹̙͉̭̯Ẅ̶̫͖̜͓̻̦͔͎͎̰́̒ͬ̋ͬ̊͊̉̉ͩ̓͘͠Aͦͤͮ̅̎̍͐̄ͩ͆ͦ̀̏ͫ̋ͥ̓ͦ̈́҉̸̴̲̭͓̻̼̟̟̤̰̩͙̪͇̱l̘̺̱̻̠͈͓ͦ͂ͨ̆̀ͥͩ͂̍ͩ͗ͯ̽͘͢͞L̴͈̟̝̬̲͇̰͍̻̠̻̳̀ͯ̌̃̅͛͑̽ͥͪ̎̇̚͜ͅs̴̼̮͇̩̻͔̽ͩͩ͊ͮͤ̒̈̃̂͊̅ͭ̀͑̿͊̀́͝͝͡ͅ ̨̨͑̇̂ͧ̀ͫͮ̋̿̓̚͏̥̪̳̘͈̞t̶͙̲ͦ̏ͮ̓ͩ́ͣ̑ͣͤ͗ͨ̿̑͌ͭ̚͝ͅh̵̵̵̼̦͎̭͖̟̟̘͙͖̰̍̿́͟͡Eͫ̈́̔̆̃ͪ̓̀̐ͪͨ̇ͮ̆̌͝͏̜͈̗͓͇̦͔͎̪Y̨͙̭̤͕͕͉͎̅̿́̄̈̈́̐̌͌̇ͣͦ̄͗ͤ͟ ̐̌͊ͦͯ̄̔͋̅͊͡҉̗͙̘͍͔̱̯̙a̵̒̄̓ͣͩͬ͝͞҉͇̜̯̜͈̱͍͖̻̯̥͞ͅṞ̷̵̡̖͚̦̓ͮͧ̿ͯ̈̄̋̅̆͋ͥ͞ͅe̸͔̖͈͙̞̱̝͙ͨ́̓ͫ̆̆́͋́̕͡ ̨̛̘̰̪̲̬̳̦̜̯̺͇͉̺̹̘̭̳̃̅̑ͥ̓̋͛̇ͬ͛̀ͬ͢͡ͅT̴̸̙̗͓͓̻͔ͩ̇̽ͮ̆̐̃͆͆̈́ͧ͌̑͋̔̍̚̚͟͞r̴͙͈̩̹̭͙̲̯̗̮̭̟͑ͤͭ͋̾̊͊̔̊̍̏ͧ̄̎̚y̥̣̘͇̮͙̜͔͍͔̞̲̖̭͉͈̝ͦͨ͑̅̽̑̈ͫ͋̈̒ͨ͑͟͡i̷̤͎̩̭͖͎̳̰̘̠ͩ̋ͧ̓ͧ̈͛͐͒̐̐͒̀̓͛̋͘͞ͅn̍̑̍ͤ̌͒̀̚͏̬̺̥̼͇̖̘̘̩͕̠̣g̴͓̖̳̝̹̱̲̪̱̱̟̠̿͂́̽̎̆̔͒͌ͬ̌̌̌͌̂͘͞ ̶̢̡̜͔̜͔͍̍̑̽͑ͦͦ̑́͘t̴̼̺̩̥͍̝̬͎̺̭̬̎̃ͦ̋̈͂͗ͬ̚̕͞ͅo̴̭͓̝̰͋ͤ͒ͮ̑̿͝E̵̜̘̺͍̰̗͍̤͈̬̹̪͇̜̼ͥͤ͗̾͆͛̀͢͠Ả̶̯̥̜͉̭̬̪̦͈̽̒ͬͣͦ̂͊̅͊͌ͦͧ̾͢͠Ț̡̛͙̙̯̥̮̞̬̟̼͔͔̜͋̾͐̄͜͠ ̶̶̴̹̮̫̮̗̤̮͚͇̬͈̗̰̖͖̐̑ͥ̊ͅͅṁ̷ͯ͌ͧ̅ͭ҉͙͇̺͍̟̙̭͚͚̮̠̯̠̺̲͇̯e̷̸͖̗̜̫̼̼̭̓̓̊̉ͭͨ̄͒̎̌̏͆̂̑̓̕͝͡ͅ!̷̡̟̪̤͖̰̗͕̟̲̝͎̍͛̅̋̒ͫ͋̎ͭ̒ͤ͆ͩ̏͑ͮͧͮ̚͟͟͞End of report", 1, 133]
+["Spooky's Jump Scare Mansion", 'what some might call, a SPICY MEMEBALL ( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)( ͡☉ ͜ʖ ͡☉)SUFFER', 1, 266]
+['Sakura Clicker', 'â\xa0€â\xa0€â\xa0€â\xa0€â\xa0€â\xa0€â\xa0€â\xa0€â\xa0€â\xa0€â\xa0€â\xa0€â\xa0€â\xa0€â™« Avicii - Lonely Together â™«â\xa0€â\xa0€â\xa0€â\xa0€â”€â”€â”€â”€â”€â”€â”€âšªâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€', 1, 24]
+['Sakura Clicker', '( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)( ͡° ͜ʖ ͡°)', 1, 433]
+['Dota 2', 'Я считаю что дота вполне отличная игра. Отличный геймплей, графика, музыка, радует донат который никак не влияет на игру, а сделан для красоты. Мне всё в принципе понравилось, но есть одно "но". Нужно много часов потратить для изучения хода игры, тактики и панмания действий всей команды включая тебя самого и следить за тактикой противника. Обидно то что люди начавшие играть, начальных уровней буду сталкиваться с людьми не совсем понимающих действий происходящего. И как никак в игре есть  неодекваты которые есть в любом социуме. В целом игра отличная, главное не перебарщивать.Надеюсь Вам понравился мой отзыв. Всем приятной игры, спасибо за потраченное время!!!', 1, 101]
+print("English Reviews Left:\t{0}".format(len(englishReviews)))
+print("Discarded non-English reviews:\t{0}".format(len(nonEnglishReviews)))
+English Reviews Left:	17403
+Discarded non-English reviews:	91
+Disclaimer Tag Removal
+
+"Early Access Review" and "Product received for free" disclaimers always occur at the start of the review sentences (if present). The disclaimer tags are present in 6000 of the ~17500 reviews, which can significantly skew word frequencies if left unchecked.
+
+#Remove some automatically inserted tags within the review
+# => (wasAltered:bool, correctedLine)
+def removeStartingPhrase(line, phraseList):
+    for phrase in phraseList:
+        if line.startswith(phrase):
+            return (True, line[len(phrase):])
+    return (False, line)
+
+automaticInsertions = ["Early Access Review", "Product received for free"]
+
+originals = []
+for review in englishReviews:
+    needsCorrection, correctedLine = removeStartingPhrase(review[1], automaticInsertions);
+    if needsCorrection:
+        originals.append(review[1])
+        review[1] = correctedLine
+print("Disclaimer Tags removed from {0} reviews".format(len(originals)))
+Disclaimer Tags removed from 6018 reviews
+Finding the distribution of words in Positive & Negative reviews
+For the Naive Bayes & SVM classifiers, the main feature that is being considered by model is word/token frequency. As such, looking at the most commonly occuring words could yield some insights into potential roadblocks for the classifer models.
+
+import string 
+from collections import defaultdict
+from nltk.stem.snowball import SnowballStemmer
+from nltk.corpus import stopwords
+
+sbStemmer = SnowballStemmer("english")
+
+#Minor optimization, prevent the stemmer from re-running if the value was previously computed
+priorDict = {}
+def memomizedStemmer(word): 
+    if word in priorDict:
+        return priorDict[word]
+    else:
+        stemmed = sbStemmer.stem(word)
+        priorDict[word] = stemmed
+        return stemmed
+    
+punctuationRemover = str.maketrans(string.punctuation, ' '*len(string.punctuation))
+
+def countUniqueWords(lines):
+    wordCountDict = defaultdict(int)
+    for line in lines:
+        for word in line.lower().translate(punctuationRemover).split():
+            wordCountDict[memomizedStemmer(word)] += 1
+    return wordCountDict
+
+def getDocumentFrequency(lines):
+    docFrequency = defaultdict(int)
+    for line in lines:
+        #Only count whether or not it appears in this document 
+        wordSet = set(line.lower().translate(punctuationRemover).split())
+        for word in wordSet:
+            docFrequency[memomizedStemmer(word)] += 1
+    return docFrequency
+
+positiveReviews = [t[1] for t in englishReviews if t[2] == 1]
+negativeReviews = [t[1] for t in englishReviews if t[2] == 0]
+                   
+positiveWordCounts = countUniqueWords(positiveReviews)
+negativeWordCounts = countUniqueWords(negativeReviews)
+                   
+postiveWordDocFreq = getDocumentFrequency(positiveReviews)
+negativeWordDocFreq = getDocumentFrequency(negativeReviews)
+
+for stopword in stopwords.words('english'):
+    positiveWordCounts.pop(stopword, None)
+    negativeWordCounts.pop(stopword, None)
+
+positiveCols = [ (word, count, postiveWordDocFreq[word]) for word, count in positiveWordCounts.items()]
+negativeCols = [ (word, count, negativeWordDocFreq[word]) for word, count in negativeWordCounts.items()]
+positiveDF = pd.DataFrame(positiveCols, columns=["word", "count", "doc-freq"]).sort_values(by="count", ascending=False)
+negativeDF = pd.DataFrame(negativeCols, columns=["word", "count", "doc-freq"]).sort_values(by="count", ascending=False)
+
+positiveDF['doc-frac'] = positiveDF['doc-freq'] / len(positiveCols)
+negativeDF['doc-frac'] = negativeDF['doc-freq'] / len(negativeCols)
+Heavy overlap in the most common words for Negative & Positive Reviews
+
+From the two tables below, 4 out of 5 of the most common words for negative and positive reviews overlap ("game" , "play", "get", "like"). Given the similarity of the distributions of the most common features, this could potentially lead to poor classification accuracy.
+
+positiveDF.head()
+word	count	doc-freq	doc-frac
+16	game	32487	11186	0.395153
+73	play	12245	8412	0.297160
+18	like	7735	4526	0.159884
+85	get	7232	4656	0.164476
+160	good	4978	3094	0.109298
+negativeDF.head()
+word	count	doc-freq	doc-frac
+57	game	26225	8228	0.343234
+389	play	8923	6016	0.250959
+153	get	6951	4043	0.168655
+277	like	5132	3084	0.128650
+80	time	4508	3044	0.126981
+An Attempt to engineer more distinct features
+
+Instead of taking a look at just the most common words in both the Negative & Positive Reviews, the words that are most likely to appear in only Positive or Negative reviews may prove more useful as input features.
+
+The likelihood of appearing in only one class (Negative or Positive) is computed as the word frequency in that class, subtracted by the word frequency in the other class, i.e.
+
+Fdelta(positive)=Number of times wordi occurs in the positive classTotal number of words in the positive class−Number of times wordi occurs in the negative classTotal number of words in the negative class
+Where higher values of Fdelta(positive) implies that the word is more likely to only appear in one class. This value is called "delta-frac" in the dataframe below.
+
+Fdelta(positive) is further normalized by multiplying it with the Intersection-Over-Union(IOU) of the fraction of word count i over the total word count for class c, i.e.
+
+Weighted IOUwordi,Class=Positive=Fdelta(positive)×(NwordiNtotal)Positive(NwordiNtotal)Positive+(NwordiNtotal)Negative
+One further normalization step to scale it to 0-1 using its min & max values is performed to produce the column "normalized-iou" in the DF below (As with before, higher values imply it is more likely to only occur in that particular class).
+
+Sorting by this metric results in more distinct word sets, and also reveals hints about data being skewed more towards certain games than others (i.e. negative reviews from World of Tanks inflating the word count for "tank" in the negative review set).
+
+An attempt will be made to use the "normalized-iou" metric to boost classification accuracy later. (Spoiler, it doesn't work)
+
+P.S. If you are wondering why some words appear truncated (i.e. "wast" instead of waste / wasted), that is the result of the Snowball Stemmer collapsing different word inflections into a single word stem.
+
+negativeDFMerged = pd.merge(negativeDF, positiveDF, on="word", how="left", suffixes=["_neg", "_pos"]).fillna(0)
+negativeDFMerged["delta-frac"] = negativeDFMerged["doc-frac_neg"] - negativeDFMerged["doc-frac_pos"]
+negativeDFMerged["weighted-iou"] = negativeDFMerged["delta-frac"] * (negativeDFMerged["doc-frac_neg"] / ( negativeDFMerged["doc-frac_neg"] + negativeDFMerged["doc-frac_pos"]))
+negativeDFMerged["normalized-iou"] = (negativeDFMerged["weighted-iou"] - min(negativeDFMerged["weighted-iou"])) / (max(negativeDFMerged["weighted-iou"]) - min(negativeDFMerged["weighted-iou"]))
+negativeDFMerged = negativeDFMerged.sort_values(by="normalized-iou", ascending=False)
+#negativeDFMerged = negativeDFMerged.sort_values(by="delta-frac", ascending=True)
+negativeDFMerged.head(25)
+word	count_neg	doc-freq_neg	doc-frac_neg	count_pos	doc-freq_pos	doc-frac_pos	delta-frac	weighted-iou	normalized-iou
+11	money	2954	1826	0.076172	1615.0	1164.0	0.041119	0.035053	0.022764	1.000000
+130	wast	791	735	0.030661	218.0	201.0	0.007100	0.023560	0.019130	0.922507
+25	tank	2006	966	0.040297	976.0	479.0	0.016921	0.023376	0.016463	0.865639
+5	even	3718	2330	0.097197	2762.0	1981.0	0.069980	0.027217	0.015824	0.852006
+170	worst	603	512	0.021358	116.0	105.0	0.003709	0.017649	0.015038	0.835244
+38	bad	1654	1275	0.053187	1060.0	855.0	0.030203	0.022984	0.014659	0.827174
+178	ruin	596	536	0.022359	147.0	142.0	0.005016	0.017343	0.014165	0.816644
+48	fix	1477	1020	0.042550	682.0	616.0	0.021761	0.020789	0.013755	0.807889
+204	wors	544	456	0.019022	101.0	95.0	0.003356	0.015666	0.013317	0.798554
+164	remov	618	511	0.021317	158.0	142.0	0.005016	0.016300	0.013195	0.795960
+93	tier	987	603	0.025154	390.0	226.0	0.007984	0.017171	0.013034	0.792522
+13	pay	2743	1741	0.072626	1895.0	1460.0	0.051576	0.021051	0.012309	0.777072
+168	terribl	604	487	0.020315	153.0	142.0	0.005016	0.015299	0.012270	0.776223
+284	uninstal	420	386	0.016102	73.0	69.0	0.002437	0.013665	0.011868	0.767663
+40	grind	1589	1013	0.042258	838.0	675.0	0.023845	0.018413	0.011771	0.765589
+50	kill	1460	1160	0.048390	1017.0	843.0	0.029780	0.018610	0.011520	0.760250
+277	horribl	430	376	0.015685	93.0	84.0	0.002967	0.012718	0.010694	0.742637
+62	match	1323	952	0.039713	822.0	664.0	0.023456	0.016257	0.010220	0.732526
+12	becaus	2758	1738	0.072501	2230.0	1561.0	0.055143	0.017358	0.009859	0.724827
+84	noth	1046	843	0.035166	627.0	563.0	0.019888	0.015278	0.009759	0.722684
+253	crate	454	292	0.012181	54.0	43.0	0.001519	0.010662	0.009480	0.716737
+239	poor	469	402	0.016770	155.0	141.0	0.004981	0.011789	0.009089	0.708406
+98	anyth	959	792	0.033039	604.0	532.0	0.018793	0.014245	0.009080	0.708218
+66	chang	1282	1081	0.045094	985.0	854.0	0.030168	0.014926	0.008943	0.705296
+262	broken	444	348	0.014517	113.0	99.0	0.003497	0.011020	0.008880	0.703957
+positiveDFMerged = pd.merge(positiveDF, negativeDF,  on="word", how="left", suffixes=["_pos", "_neg"]).fillna(0)
+positiveDFMerged["delta-frac"] = positiveDFMerged["doc-frac_pos"] - positiveDFMerged["doc-frac_neg"]
+positiveDFMerged["weighted-iou"] = positiveDFMerged["delta-frac"] * (positiveDFMerged["doc-frac_pos"] / ( positiveDFMerged["doc-frac_neg"] +  positiveDFMerged["doc-frac_pos"]))
+positiveDFMerged["normalized-iou"] = (positiveDFMerged["weighted-iou"] - min(positiveDFMerged["weighted-iou"])) / (max(positiveDFMerged["weighted-iou"]) - min(positiveDFMerged["weighted-iou"]))
+positiveDFMerged = positiveDFMerged.sort_values(by="weighted-iou", ascending=False)
+#positiveDFMerged = positiveDFMerged.sort_values(by="delta-frac", ascending=True)
+positiveDFMerged.head(25)
+word	count_pos	doc-freq_pos	doc-frac_pos	count_neg	doc-freq_neg	doc-frac_neg	delta-frac	weighted-iou	normalized-iou
+10	free	3924	2778	0.098135	1680.0	1227.0	0.051185	0.046950	0.030856	1.000000
+14	great	3221	2425	0.085665	1210.0	977.0	0.040756	0.044909	0.030431	0.990146
+0	game	32487	11186	0.395153	26225.0	8228.0	0.343234	0.051920	0.027785	0.928819
+1	play	12245	8412	0.297160	8923.0	6016.0	0.250959	0.046200	0.025047	0.865361
+7	veri	4645	2524	0.089162	1990.0	1274.0	0.053145	0.036017	0.022566	0.807854
+41	best	1952	1598	0.056450	695.0	597.0	0.024904	0.031546	0.021890	0.792172
+8	fun	4521	3229	0.114067	2611.0	1871.0	0.078049	0.036017	0.021385	0.780475
+92	learn	1164	974	0.034407	286.0	246.0	0.010262	0.024145	0.018598	0.715889
+2	like	7735	4526	0.159884	5132.0	3084.0	0.128650	0.031234	0.017308	0.685973
+100	amaz	1123	940	0.033206	296.0	257.0	0.010721	0.022485	0.016998	0.678787
+21	lot	2671	1986	0.070157	1353.0	1027.0	0.042842	0.027315	0.016959	0.677895
+51	friend	1840	1547	0.054649	893.0	714.0	0.029785	0.024864	0.016093	0.657823
+78	ship	1277	638	0.022538	157.0	95.0	0.003963	0.018575	0.015797	0.650964
+40	enjoy	1955	1721	0.060796	973.0	866.0	0.036125	0.024670	0.015475	0.643492
+42	love	1911	1566	0.055320	889.0	758.0	0.031620	0.023700	0.015080	0.634347
+4	good	4978	3094	0.109298	3064.0	2068.0	0.086267	0.023030	0.012871	0.583150
+90	bit	1164	988	0.034902	465.0	390.0	0.016269	0.018633	0.012709	0.579384
+121	easi	990	845	0.029850	352.0	296.0	0.012348	0.017502	0.012381	0.571786
+57	differ	1645	1232	0.043521	732.0	589.0	0.024570	0.018951	0.012113	0.565566
+24	10	2583	1730	0.061113	1297.0	993.0	0.041423	0.019690	0.011736	0.556828
+144	overal	866	792	0.027978	303.0	277.0	0.011555	0.016423	0.011623	0.554208
+11	realli	3736	2469	0.087219	2427.0	1601.0	0.066786	0.020433	0.011572	0.553034
+85	nice	1191	936	0.033065	439.0	387.0	0.016144	0.016921	0.011370	0.548348
+182	awesom	683	603	0.021301	184.0	158.0	0.006591	0.014710	0.011234	0.545208
+214	definit	589	534	0.018864	137.0	123.0	0.005131	0.013733	0.010796	0.535057
+(Baseline) Multinomial Naive Bayes with no prior text preprocessing.
+The following is the use of a Multinomial Naive-Bayes model to classify the reviews with no prior test pre-processing (aside from the text cleanup we did earlier). This yields a baseline accuracy of 83%.
+
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.model_selection import train_test_split
+
+ntlkStopWords = list(stopwords.words('english'))
+
+vectorizer = CountVectorizer(stop_words=ntlkStopWords, max_features=10000)
+#vectorizer = CountVectorizer(max_features=10000)
+#vectorizer = TfidfVectorizer(stop_words=ntlkStopWords, max_features=10000, ngram_range=(1,2), min_df = 3)
+
+data_reviews_text = [review[1] for review in englishReviews]#df["user_review"].values.tolist()
+data_sentiment = [review[2] for review in englishReviews] #df["user_suggestion"].values.tolist()
+
+data_review_vec = vectorizer.fit_transform(data_reviews_text);
+from sklearn.naive_bayes import MultinomialNB
+
+train_x, test_x, train_y, test_y = train_test_split(data_review_vec, data_sentiment, test_size=0.2, random_state= 0xDEADBEEF)
+
+mnb = MultinomialNB()
+mnb.fit(train_x, train_y)
+print("Multinomial Naive Bayes (No pre-processing): {0} %".format(mnb.score(test_x, test_y) * 100))
+Multinomial Naive Bayes (No pre-processing): 83.48175811548406 %
+Multinomial Naive Bayes with intersection-over-union Weights applied
+After getting the word vectors from the count vectorizer (Tf-Idf doesn't boost accuracy in this case btw), the words that are more likely to only appear in either the Positive or Negative classes will have their counts boosted by multipyling them with the "normalized-iou" value for positive and negative classes computed in the section above.
+
+This actually results in a slight loss of accuracy (validation acc. drops to below 83%).
+
+negativeWordWeightDict = dict(zip(negativeDFMerged['word'],negativeDFMerged['normalized-iou'] ))
+positiveWordWeightDict = dict(zip(positiveDFMerged['word'],positiveDFMerged['normalized-iou'] ))
+
+vocabDict = vectorizer.vocabulary_
+wordVecLength = len(vocabDict)
+
+negativeWeightVec = np.zeros(wordVecLength)
+negMissing = []
+negAdded = 0 
+for word, idx in vocabDict.items():
+    if word in negativeWordWeightDict:
+        negAdded += 1
+        negativeWeightVec[idx] = negativeWordWeightDict[word]
+    else:
+        negMissing.append(word)
+
+positiveWeightVec = np.zeros(wordVecLength)
+posMissing = []
+posAdded = 0 
+for word, idx in vocabDict.items():
+    if word in positiveWordWeightDict:
+        posAdded += 1
+        positiveWeightVec[idx] = positiveWordWeightDict[word]
+    else:
+        negMissing.append(word)
+
+mergedWeights = np.add(negativeWeightVec, positiveWeightVec)
+mergedWeights = np.square(mergedWeights)
+mergedWeights += 1 #smoothing
+    
+print("word vocabulary length: {0}".format(wordVecLength))
+print("neg. word vocabulary: {0}".format(len(negativeWordWeightDict)))
+print("pos. word vocabulary: {0}".format(len(positiveWordWeightDict)))
+print("Matching negative words: {0}".format(negAdded))
+print("Matching positive words: {0}".format(posAdded))
+word vocabulary length: 10000
+neg. word vocabulary: 23972
+pos. word vocabulary: 28308
+Matching negative words: 4261
+Matching positive words: 4346
+data_review_vec_weighted = np.multiply(data_review_vec.toarray(), mergedWeights)
+train_weighted_x, test_weighted_x, train_weighted_y, test_weighted_y = train_test_split(data_review_vec_weighted, data_sentiment, test_size=0.2, random_state= 0xDEADBEEF)
+
+weighted_mnb = MultinomialNB()
+weighted_mnb.fit(train_weighted_x, train_weighted_y)
+print("Multinomial Naive Bayes (After applying intersection-over-union weights): {0} %".format(weighted_mnb.score(test_weighted_x, test_weighted_y) * 100))
+Multinomial Naive Bayes (After applying intersection-over-union weights): 82.87848319448435 %
+(Baseline #2) Linear SVM with no text pre-processing
+The same datasets are run through a linear SVM, both show a slight improvement over the Naive Bayes model. And yet again, using the intersection-over-union weights results in a drop in accuracy.
+
+P.S, don't make the grave mistake of using the linear SVM within the svm namespace, the specialized LinearSVC based on the LibLinear backend is significantly faster than the LibSVM variant
+
+from sklearn.svm import LinearSVC
+
+svClassifier = LinearSVC(max_iter=3000, tol=1e-5, dual=False, C=0.01)
+
+svClassifier.fit(train_x, train_y)
+print("Linear SVC, acc = {0} %".format(svClassifier.score(test_x, test_y) * 100))
+Linear SVC, acc = 83.76903188738868 %
+svWeightedClassifier = LinearSVC(max_iter=3000, tol=1e-5, dual=False, C=0.01)
+
+svWeightedClassifier.fit(train_weighted_x, train_weighted_y)
+print("Linear SVC (with intersection-over-union weights), acc = {0} %".format(svWeightedClassifier.score(test_weighted_x, test_weighted_y) * 100))
+Linear SVC (with intersection-over-union weights), acc = 83.68284975581729 %
+Inspecting the wrongly classified reviews
+#Append an index at the start pointing back to the original review
+data_review_vec_labelled = [ [idx, review] for idx, review in enumerate(data_review_vec.toarray())]
+data_sentiment_labelled = [ [idx, label] for idx, label in enumerate(data_sentiment)]
+
+train_x_lab, test_x_lab, train_y_lab, test_y_lab = train_test_split(data_review_vec_labelled, data_sentiment_labelled, test_size=0.2, random_state= 0xDEADBEEF)
+#=> [originalreview, prediction, groundTruth][]
+def GetMispredictions(indexedX, indexedY, spClassifier):
+    onlyX = [x for lbl, x in indexedX]
+    predictions = spClassifier.predict(onlyX)
+    incorrectPredictions = []
+    for idx, pred in enumerate(predictions):
+        groundTruth = indexedY[idx][1]
+        isCorrect = pred == groundTruth
+        if not isCorrect:
+            originalReviewIdx = indexedY[idx][0]
+            originalReviewText = data_reviews_text[originalReviewIdx]
+            incorrectPredictions.append([originalReviewText, pred, groundTruth])
+    return incorrectPredictions
+
+mispredictions = GetMispredictions(train_x_lab, train_y_lab, mnb)
+actual_recommends = [lst for lst in mispredictions if lst[2] == 1]
+actual_disgruntled = [lst for lst in mispredictions if lst[2] == 0]
+
+print(len(actual_recommends))
+print(len(actual_disgruntled))
+933
+798
+Potential Hurdles
+
+Glancing through the misclassified reviews in the tables below highlights a subset of reviews which may prove especially problematic to these simple categorizers (SVM, Naive Bayes), namely:
+
+Sarcastic Reviews - Look no further than row #10 or #0 in the dataframe below. When the tone mismatches the actual recommendation, inference is bound to be more difficult
+Getting a model to understand scarasm may be a bit of a stretch for SVMs or Naive Bayes, and hence they will not be tackled in this case. (LSTM neural networks may fair better, but the current dataset of 17K reviews may prove too small without any form of transfer learning)
+
+What is surprising though is how reviews with the phrase "not recommend" gets misclassified as a positive review (in the second dataframe below). Other shortcomings of the CountVectorizer are also highlighted in the reviews that are incorrectly labelled as positive (screams such as "aahhh" somehow labelled as positive). These shortcomings will be addressed by feeding the text through a rudimentary text processor.
+
+actual_recommends_df = pd.DataFrame.from_records(actual_recommends, columns=["review","prediction","ground-truth"])
+actual_disgruntled_df = pd.DataFrame.from_records(actual_disgruntled, columns=["review","prediction","ground-truth"])
+
+pd.set_option('display.max_colwidth', 500) 
+actual_recommends_df.head(20)
+review	prediction	ground-truth
+0	Alright so a lot of people are hating on CA decks or something but you guys are clearly forgetting something way worse. Clearly the major problem is the fact that this port doesn't allow to download the japanese voices. like how can i be a real weeaboo without my SAIBERU ANGERU DAKINI, that would at least make those decks alright.	0	1
+1	A game that excels in building up suspense and laying it on thick with the jump scares when needed, even if it is all random!Even in it's unfinished form I can see this will be an indie hit. I have attached a short play session below so you can check out what it is like!https://youtu.be/gfwojtgugNU	0	1
+2	Decent gameplay, but with the current Rommel build, impossible to level up, and so losing my recommendation. The previous build was not so much a pay to win, this one.. very much so. If they revert the XP costs, I would very much recommend it	0	1
+3	Yeah, I'd recommend this. 1, It's a free to play game that's actually good, damage caused by area of hit, possiblitily to repair, replace crew, believable enviroments. 2, It's NOT an MMORPG!!!!!3, Graphics 9/10 (but this depends on your system of course), low is pretty good quality, I play on high with frame rate of 60+, and although it says not to play in 'movie' mode, I did, and still got average of 35fps! VERY OPTIMIZED if you ask me!4, Great system for purchases and research, yes y...	0	1
+4	This is a fun game. Can be a little unbalanced at times, and sometimes you get stuck with a derp team. But it is fast paced, within only a day of game time I've already reached the point where you actually have to grind a little to earn the next tier tank. I think this game has alot of potential.Edit: After a few Days of "Grinding" I think its only fair to update my review.First off, the teams are rarely useful, Tier IV tanks are also rarely useful. I cant tell you how many matches I've play...	0	1
+5	At last, a Grand Sphinx will teach you to respect!Cower in fear of my Lord of the Lost Lands! ENOUGH OF YOUR VANDALISM! YOU HAVE AWAKENED US! THIS WILL NOW BE YOUR TOMB!Ha.. ha...Pretty much sums up the game.	0	1
+6	For a Beta, I think it's very good; some things, like the gold/exp drop could be improved, and usable items could be dropped instead of just crafting materials.My main complaint is that the "summon friend" function doesn't work. You either face an endless "connecting to server" screen, or appear in the world with a semi-opaque "joining friends server" box in the middle of your screen, unable to attack but vulnerable to enemies-- and your friend is nowhere to be seen.	0	1
+7	After seeing this game in the popular section of FTP games, I decided to try it out. Apparently I had played it before even though I don't remember doing so. Logged in and had a level 6 Templar loaded and ready. Spent about two minutes fumbling about with an unfamiliar UI while walking down a sandy beach. Eventually came across the one spell I had. It summoned up to 3 zombies from nearby corpses to fight for me.Can honestly say I have never enjoyed killing crabs and resurrecting them into od...	0	1
+8	Oh dear oh dearIt started well, I was winning, I had 2 million and then BAM, I landed on Moscow, with the world championships. It was worth 2 million. I had I had 2 million, and 2 cities worth both a million. It sold them and sent me bankrupt. I had enough to pay for it, but it bankrupt me anyway. It's a good game, I reccomend it but make a no time limit mode.	0	1
+9	I got this game when it required you to pay for the game. I love everything about this game except that the people that paid get no cosmetics or anything now that it's free. The lag is also another big thing. This game has next to no lag compensation. If you lag for even one second, no matter how good you think your internet is, it can decide whether or not you get first place in a game. If you fall off the side from lag, without somebody hitting you first, you lose 3 entire points.	0	1
+10	The superior fps experience. 11/10 IGN no hackers in any match ever. Absolutely no broken animations, hitboxes or other completely game-breaking bugs or glitches at all!I have never, in any match, played against anyone called xXx_Pu$$Y$LaYeR69_xXX at level 14454123, who definitely didn’t have wallhacks, aimbot, unlimited money, and was flying around the map like a this is Call of Duty World-at-♥♥♥♥ing-War!Absolutely would recommend to anyone with anger-management issues, suicidal depression,...	0	1
+11	Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very Very V...	0	1
+12	Game really fun to play, and you can play with it with a bad pc. The People who are just hating on the game are the people who only have prob 5 hours played maybe even less	0	1
+13	Edit: Apparently this game having red shell was a false alarm. There is no red shell in this game. If you don't know what redshell is look it up. That being said it's a pretty good clicker. The visuals don't have any animations though and rarely change, kinda plain and boring at first but it get's better after a while. Worth checking out if you are into clickers.	0	1
+14	The game had server issues, like nearly every single mmorpg at launch. But they took servers down and added more and it was fixed by second maintenance.They had some other bugs like the splash screen bug, but they addressed it within 2 days and fixed it.They had seriously long queues for some servers, but they did a temp lockout on the more populated servers to stabilize them.No mmorpg release is perfect, and there's always tons of unknowns that occur. But Neowiz is doing a fine job of handl...	0	1
+15	As a veteran, the game gets boring over time, but then I want to return to it, but then it gets boring again, and this time I came back to it. The pay to win gimmick doesn't bother me that much, it's just a bunch of cosmetics and maybe weapons, but not extremely annoying, I hope they didn't screw everything up.	0	1
+16	gunplay fun and overall funhowever whoever is in charge of designing the maps has no idea what he or she is doing at allthe maps in this game are all horribly designed please fix	0	1
+17	I know a lot of people don't like these types of games that show up because "Mobile games belong on mobile", however I would like to try to convince you guys that this one is an exception. I played several months of the mobile version of this game and hope to at least make those of you on the fence curious enough to give it a shot. Yu-Gi-Oh! is a pretty reknown franchise that struck most of us as kids, some younger some older. For me, I was about 10 years old, getting ready for a cheerleadin...	0	1
+18	The game is fun in an ironic way. It's really poorly designed, and the movement feels absolutely terrible, but I still had some fun playing this with a friend. The gunplay wasn't bad, but I didn't enjoy the movement. Also I hated that I couldn't change my crouch button to shift (what I've always used). The best part is that there is no pay to win issue at all, since you can buy guns with points in every match. I'd only recommend this game to someone who wants to have some (ironic) fun, prefe...	0	1
+19	Smashed T-51 planes into each other for 2 hours. Honestly some of the most fun I have ever had in a video game. Don't get this game cause of realism and flight physics. Get this game to crash planes into each other.	0	1
+actual_disgruntled_df.head(20)
+review	prediction	ground-truth
+0	One of the most toxic player bases in the MOBA genre and that's with games like LoL and Dota with people telling others to kill themselves every game. However those games have the advantage of being good. Kudos to smite for having varied game modes. and the third person perspective really changes up the formular. The game is serviceable - if you're willing to ignore the games glairing fault. Its community. Today for example I played 7 games throughout the day.2 of which I was told to kill my...	1	0
+1	Only if you can deal with the awwwwfuullll!! interface. Gotta love free games! Only cool when you finaly start battling. Way too many currencies and "collect these" "collect those"	1	0
+2	I dunno, I guess I can't really recommend it anymore. TL;DR, it used to be a good game to play with friends.Now it's just another competative multiplayer.Valve really screwed up in that they put a throttle on the creativity and fun of the game, and laid out the rules as "here's what you do, and how you do it." I don't particularly think TF2 was ever meant to be like this, and if Valve themselves said that this was their original dream of the game, I wouldn't believe them. It just seems too i...	1	0
+3	This Game is not " Free to Play " its just a highly restricted and limited Demo Version and should not be allowed to be " Sold " under the Argument of Free to Play . The Content you can enjoy without a Subscribtion is maybe 5% of the Game.100% a No.	1	0
+4	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa	1	0
+5	As a hunting simulator this meets its mark quite well, but as a game it just is not very fun to play and the ammount of microtransactions is absurd. In all i would not recomend this game.	1	0
+6	ARGHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!IT ALWAYS CRASHES!!!!!Other than that its kinda fun... s...	1	0
+7	Finished the story in 3 hours. Arena is quite cool, but overall? It's not worth spending money on. The second story is about as long as the first and they want GBP19.99 to unlock? I think not. Pros: Free to playThe one story you get is pretty goodThe mechanics are probably better than hearthstone, which is it's closes rival.The deck types are quite cleverly laid out and have good internal Synergy: Willpower is generally about helping your creatures out, whilst intelligence is all about direc...	1	0
+8	Just another mini-battle game...We can expect tons of LAG, 18x18 battles ( battle cap ), lot of "waste your gold" features, usual loggin problems due to the excess of simultaneous loggins, maps on the game doesn't have any relation with it's geographical localization on the world map. 4/10	1	0
+9	DON'T WASTE YOUR MONEY ON THIS TITLE!! THERE ARE BETTER SIM-RACING GAMES! I recommend iRacing, Rfactor2, Live for Speed, Project C.A.R.S, F1 Series, Assetto Corsa, Richard Burns Rally..... and Grand Turismo 5/6	1	0
+10	Meh, only open servers are in russia so there'sâ™¥â™¥â™¥â™¥â™¥â™¥loads of lag for anyone not from there also the game is really damn easy. http://prntscr.com/8ojhfg	1	0
+11	Though I think this game is decent, and would recommend this game to younger HTTYD fans, I would not recommend this game to a hardcore gamer, or a teenager-adult. All this actually game actually is another cash grab made by Jumpstart. You have to buy gems, or a 10 dollar membership which is a downside. Another flaw is weither you disagree or not, this is a pay to win game, but that's pretty reasonable. I also have to warn you that when you boot your game up, there's gonna be lots of lag, but...	1	0
+12	Me gustó mucho al principio, luego, cuando ya subí a lvl 20 me aburrió, ya que es siempre lo mismo, hacer dungeons y nada más, la progresión de tu personaje se hace DEMASIADO LENTA a medida que subes de lvl, mecánicas simples y aburridas, nada mas que decir..	1	0
+13	i kinda have the feeling that this game's developer is a salty magic player. this game has a bad ruling, fast spells doesn't recognize what's called player turn priority. also, 75 cards in a deck? that's too many, even standard magic only has 60 cards. even the mulligan is worse than magic. the good thing bout this game is you can play for free by grinding in gauntlet. also the arena draft is kinda interesting cus you get to collect what you draft.	1	0
+14	After playing Cookie Clicker and Clicker Heroes (and I like those), this one looked interesting too. However, there seems to be very little to this game. It's boring. Too long between upgrades, only one faction it seems, and too much punishment for idle play. I kind of wish the map was more than just eye candy. Honestly this game seems like a quarter of a game-- yes, I mean compared to Cookie Clicker and Clicker Heroes.	1	0
+15	Realm of the Mad God is a medieval-themed rogue-like with 2D pixel graphics. There is no story or campaign, only some background lore. The object in the game is to wreck havoc and kill creatures on a huge island (the realm). These creatures are Oryx's (the Mad God) minions. Killing them will earn exp and drop some occasional loot. Killing tougher monsters (gods) will♥♥♥♥♥♥Oryx off (hence the name: Mad god). When angry, Oryx will teleport the players on the island to his castle, where the...	1	0
+16	this is a terrible game. procedure genereted endless worlds; basic crafting; combat; MMO like questing;...it all sounds cool. but it's just bland and boring when you are actually in the game. so no.	1	0
+17	It's an okay game, that's all. It's boring at first but if you get into it, it gets really addictive. If you're looking for a game to distract you from things and to just be.. chill, then this game might be for you. If you're looking for a good game that doesn't cheat you, isn't pay to win, and isn't just unfair then don't get into it. Overall, I'm still playing it and I probably won't stop anytime soon so there's that.	1	0
+18	Reward system used to be pretty generous, but they scaled it back. This is totally backward and the price to craft specifically "legendary" rarity cards is too high. I play this game because a little cash goes a long way here and for the most part it has been a quality product so far, but its falling behind now and i may just go back to hearthstone or mtg arena if things dont improve	1	0
+19	Don't get me wrong, it isn't a terrible game or anything. It's just not as good at doing the various things it does as the games that it's based on. AdventureQuest, AdventureQuest Worlds, and DragonFable. Best I can tell they tried to combine all the things that made there previous games fun into one big game, but it just ended up not being as good at what made any of those games fun. I'm going back to old fashioned AdventureQuest. I also don't feel like grinding my way badk into the mid...	1	0
+Improving the model through Text Pre-Processing
+Simply using the CountVectorizer to get word embeddings is bound to result in the following issues:
+
+English contractions will be dropped entirely
+When splitting words, the count vectorizer uses the following Regex Pattern: r”(?u)\b\w\w+\b”. In short, it treats any consective sequence of alphanumeric characters (including the underscore _) of length 2 or more as separate words. For common contractions such as "can't", the 't' will be dropped entirely, resulting in only the token "can". Other egregious examples include "won't" → "won" or "don't" → "don".
+To resolve this, two strageties are used:
+[The "n't" contraction] - The character sequence "n't" will be replaced as a separate word "not". This is achieved using a combination of a simple Regex replacement pattern and string.replace() for the edge cases "can't" and "won't"
+[Other contractions (')] - The apostrophe is removed and the word is merged into a single token (i.e. "I'm" → "Im")
+Note: Yes, this does lead to inaccurate contractions (i'll → ill), but is in line with how most people ignore proper punctuation in informal messages. In fact, tests with replacing the apostrophe with an underscore (_) to preserve the distinction yields lower prediction accuracies (see comment in the source code below for details), which lends credence to this theory.
+Repeated characters used for emphasis will be treated as entirely different words
+Repeated characters such as in "AAAHHHHHHHHHH" may sometimes be used for emphasis. Problem is, the count vectorizer treats each instance as a completely different word as long as it differs by even one character. This adds noise to the word embeddings when passed to the Models for training
+Solution - Contract any sequence of 3 or more of the same character (characters don't repeat more than twice in English words AFAIK) into the phrase "rep_\<insert charcter here>". (i.e. "AAAAHHHHHH" → "rep_Arep_H")
+Different word inflections are treated differently
+Different grammatical inflections do convey different meanings, however, given that the statistical models look at each token individually, they are likely to be unable to make sense of the distinction.
+Solution - Use a word stemmer to reduce different inflections into a single form. [Note: ScaPy does have a lemmatizer, which is a more powerful tool to reduce words to their common form, but it runs far more slowly (especially since memoization cannot be used as an optimization technique as each Lemma depends on the entire sentence)]
+Modifier/ Qualifier words are read in isolation without context
+These modifier/qualifier words serve to add meaning to other words, and thus are less informative on their own.
+Solution - Insert a Bigram/Trigram of the modifier word by appending the prior or next word to the modifier word to get a new token. (i.e. the phrase "would not recommend" produces the following list of tokens ["not", "wouldnot", "notrecommend", "wouldnotrecommend"])
+Note: A sane Software Engineer would likely use a dictionary and a rolling list of previously seen tokens to construct the Bigrams/Trigrams. I have instead opted to use this opportunity as an excuse to write a horrendously long Regex.
+import re
+
+overlapListRaw = [ 
+    "not", "would","cant","good","but","like","get","time","only","money", "pretty", 
+    "free", "play", "great", "very", "fun", "best", "like", "lot", "friend", "enjoy", "learn" , "love", "good", "really", "well", "easy", "nice", "still", "help",
+    "money","even","waste","tank","bad","pay","fix","kill","grind","worst","because","ruin","tier","remove","match","worse","terrible","nothing","change","make","update","uninstall","want"]
+
+overlapList = [memomizedStemmer(word) for word in overlapListRaw]
+
+genBigramRegex = r"\b(?:(\w+)\s+)?(" + "|".join(overlapList) + r")\s+(\w+)\b"
+bigramReplacementRegex = r"\2 \2\3 \1\2 \1\2\3"
+
+def processSentence(line):
+    #1.1) for the n't contraction, expand the "not" into a separate word
+    notAbbrSeparated = re.sub(r"(\w+)n't", r"\1 not", line.lower().replace("can't", "can not").replace("won't", "will not"))
+    #1.2) merge contractions (default tokenizer treats punctuation marks(even apostrophes ') as word delimiters))
+    mergedContractions = re.sub( r"\b(\w+)'(\w{1,2})\b",r'\1\2', notAbbrSeparated) #replace r'\1\2' with r'\1_\2' to observe the drop in accuracy
+    #2) Condensing long trails of letters into rep_<letter>
+    condensedRepeats = re.sub(r"([a-zA-Z])\1{2,}", r"rep_\1", mergedContractions)
+    #3) Word stemming
+    stemmed = " ".join([memomizedStemmer(word) for word in condensedRepeats.split()])
+    #4) Selectively inserting "Bigrams" / "Trigrams"
+    withBigrams = re.sub(genBigramRegex, bigramReplacementRegex, stemmed)
+    #merge negation modifiers with the next word
+    return withBigrams
+
+data_reviews_text_eng = [processSentence(review) for review in data_reviews_text]
+data_sentiment_eng = data_sentiment[:]
+
+#overlapList
+#print(processSentence("I'll"))
+Effects of applying Text-Processing
+Running the processed text through the Multinomial Naive Bayes and Linear SVC both yield slight improvements, with the Linear SVC inching up from 83% to 85% validation accuracy.
+
+vectorizerEng = CountVectorizer(stop_words=ntlkStopWords, max_features=10000)
+#vectorizerEng = TfidfVectorizer(stop_words=ntlkStopWords, max_features=10000)
+
+data_review_vec_eng = vectorizer.fit_transform(data_reviews_text_eng)
+
+train_x_eng, test_x_eng, train_y_eng, test_y_eng = train_test_split(data_review_vec_eng, data_sentiment_eng, test_size=0.2, random_state= 0xDEADBEEF)
+
+mnbEng = MultinomialNB()
+mnbEng.fit(train_x_eng, train_y_eng)
+print("Multinomial Naive Bayes (after text processing) acc: {0} %".format(mnbEng.score(test_x_eng, test_y_eng) * 100))
+Multinomial Naive Bayes (after text processing) acc: 83.85521401896007 %
+from sklearn.svm import LinearSVC #Specialized Linear SVM solver (LibLinear backend) is supposedly much faster than the Linear Kernel within the SVM namespace (LibSVM)
+from sklearn.preprocessing import StandardScaler
+#Smaller Bag of Words for the SVM
+vectorizerEngSVM = CountVectorizer(stop_words=ntlkStopWords, max_features=10000)
+
+data_review_vec_eng_svm = vectorizerEngSVM.fit_transform(data_reviews_text_eng)
+
+#scaler = StandardScaler()
+#data_review_vec_eng_svm_normalized = scaler.fit_transform(data_review_vec_eng_svm.toarray())
+
+train_svm_x_eng, test_svm_x_eng, train_svm_y_eng, test_svm_y_eng = train_test_split(data_review_vec_eng_svm, data_sentiment_eng, test_size=0.2, random_state= 0xDEADBEEF)
+
+svEngClassifier = LinearSVC(max_iter=3000, tol=1e-5, dual=False, C=0.01)
+
+svEngClassifier.fit(train_svm_x_eng, train_svm_y_eng)
+print("Linear SVC (after text processing) acc: {0} %".format(svEngClassifier.score(test_svm_x_eng, test_svm_y_eng) * 100))
+Linear SVC (after text processing) acc: 85.11921861534042 %
+Demostration
+As I mentioned above, sarcastic reviews are expected to be the Achilles Heel of the model. I have specifically fished out reviews from 2 particular games that are bound to be flooded with these:
+
+Hatoful Boyfriend - A Pigoen dating simulator
+Bad Rats - A game whose reputation can largely be defined by the first word in its title
+The small sample size yields poorer than expected accuracy - 66% (especially for reviews from Bad Rats).
+
+pigeonDatingSimulator = [ #Hatoful Boyfriend
+    ["You cannot bang the birds.", 0],
+    ["My friend sent me this and I jokingly said I'll 100% it, but I honestly didn't think I would have gotten this invested into it but here we are.", 1],
+    ["It was great back in its day, I'm sure. Fans of modern visual novels might find themselves put off by this one. In particular, the pacing seems to drag on towards the end of the BBL path.", 0],
+    ["This game is at beak of it's performance. While other games casually fail to do one thing properly, Hatoful Boyfriend delivers on it's wings story of friendship, romance, comedy, mystery and horror all in one.", 1],
+    ["This is honestly the worst visual novel game I have ever played. The storywriting is SO bad. It is full of irrelevant subplots, and very little character development. I finished the entire game in less than an hour. BORING!", 0],
+    ["The endings never go where you expect. Also birds", 1]
+]
+
+undesirableRodents = [ #Bad rats
+    ["God has put me on this earth just to play Bat Rats", 0],
+    ["Wait till Garfield hears about this.", 1],
+    ["Bad Rats got me pregnant", 0],
+    ["bad rats very pog game, 10/10. I loved the part when the ginger cat died, it was great. No complaints, very epic game.",1],
+    ["This game infects you with youtube poop disease. RUN!!! DONT GET CLOSER!!! LEAVE!!(Really though the game is a meh puzzle solving game at best. Even if its like $0.01 I wouldn't recommend getting it. If someone gifts you this game they really must hate you.)", 0],
+    ["I lost my lively hood due to this game. My son does not look at me the same as I look at him like he is a rat, and try to deal with him like he is a rat from the hip game \"bad rats\". Please honey, if you see this, i swear i've changed. You're more than a rat to me, you're my cat. All in All, bad rats very good", 1]
+]
+mergedData = [["Hatoful Boyfriend", *item] for item in pigeonDatingSimulator] + [["Bad Rats", *item] for item in undesirableRodents]
+
+demo_x_text = [t[1] for t in mergedData]
+demo_y = [t[2] for t in mergedData]
+
+demo_x = vectorizerEngSVM.transform(demo_x_text)
+
+demo_predictions = svEngClassifier.predict(demo_x)
+
+mergedDataWithPred = [[*t, pred] for t, pred in zip(mergedData, demo_predictions)]
+
+demo_matches = [1 if (pred == groundTruth) else 0 for pred, groundTruth in zip(demo_predictions, demo_y)]
+accuracy = sum(demo_matches) / len(demo_y)
+print("Demostration Accuracy: {0}%".format(accuracy * 100))
+print(demo_matches)
+Demostration Accuracy: 66.66666666666666%
+[1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0]
+demoDf = pd.DataFrame.from_records(mergedDataWithPred, columns=["Game Title","Review Text","Actual Recommendation","Predicted Recommendation"])
+demoDf.head(12)
+Game Title	Review Text	Actual Recommendation	Predicted Recommendation
+0	Hatoful Boyfriend	You cannot bang the birds.	0	0
+1	Hatoful Boyfriend	My friend sent me this and I jokingly said I'll 100% it, but I honestly didn't think I would have gotten this invested into it but here we are.	1	1
+2	Hatoful Boyfriend	It was great back in its day, I'm sure. Fans of modern visual novels might find themselves put off by this one. In particular, the pacing seems to drag on towards the end of the BBL path.	0	0
+3	Hatoful Boyfriend	This game is at beak of it's performance. While other games casually fail to do one thing properly, Hatoful Boyfriend delivers on it's wings story of friendship, romance, comedy, mystery and horror all in one.	1	1
+4	Hatoful Boyfriend	This is honestly the worst visual novel game I have ever played. The storywriting is SO bad. It is full of irrelevant subplots, and very little character development. I finished the entire game in less than an hour. BORING!	0	0
+5	Hatoful Boyfriend	The endings never go where you expect. Also birds	1	1
+6	Bad Rats	God has put me on this earth just to play Bat Rats	0	1
+7	Bad Rats	Wait till Garfield hears about this.	1	0
+8	Bad Rats	Bad Rats got me pregnant	0	0
+9	Bad Rats	bad rats very pog game, 10/10. I loved the part when the ginger cat died, it was great. No complaints, very epic game.	1	1
+10	Bad Rats	This game infects you with youtube poop disease. RUN!!! DONT GET CLOSER!!! LEAVE!!(Really though the game is a meh puzzle solving game at best. Even if its like $0.01 I wouldn't recommend getting it. If someone gifts you this game they really must hate you.)	0	1
+11	Bad Rats	I lost my lively hood due to this game. My son does not look at me the same as I look at him like he is a rat, and try to deal with him like he is a rat from the hip game "bad rats". Please honey, if you see this, i swear i've changed. You're more than a rat to me, you're my cat. All in All, bad rats very good	1
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
